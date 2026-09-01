@@ -6,6 +6,12 @@ class CodeACv < Formula
   license "MIT"
   head "https://github.com/voxvanhieu/code-a-cv.git", branch: "main"
 
+  bottle do
+    root_url "https://github.com/voxvanhieu/homebrew-tap/releases/download/code-a-cv-0.2.0"
+    sha256 cellar: :any_skip_relocation, arm64_tahoe:  "3be8ca1035083d5a503f0c51d42a4b43985c8891cb740ef485a1e894b33d5c8d"
+    sha256 cellar: :any,                 x86_64_linux: "38b5ca62d139ff966defbaafdbe9a6750c3298a0292492b7c5e141b8739fee54"
+  end
+
   depends_on "rust" => :build
 
   def install
