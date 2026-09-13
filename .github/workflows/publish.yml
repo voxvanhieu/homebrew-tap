@@ -2,6 +2,9 @@
 name: brew pr-pull
 
 on:
+  workflow_run:
+    workflows: [brew test-bot]
+    types: [completed]
   workflow_dispatch:
     inputs:
       pull_request:
@@ -10,6 +13,10 @@ on:
       head_sha:
         description: Expected pull request head commit SHA (optional)
 
+concurrency:
+  group: publish-bottles
+  cancel-in-progress: false
+
 permissions: {}
 
 defaults:
@@ -17,7 +24,61 @@ defaults:
     shell: bash -xeuo pipefail {0}
 
 jobs:
+  resolve:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'pull_request' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      number: ${{ steps.pr.outputs.number }}
+      sha: ${{ steps.pr.outputs.sha }}
+    steps:
+      - name: Resolve tested release formula
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          REQUESTED_PR: ${{ inputs.pull_request }}
+          REQUESTED_SHA: ${{ inputs.head_sha }}
+          TESTED_SHA: ${{ github.event.workflow_run.head_sha }}
+          TESTED_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          if [[ "$EVENT_NAME" == workflow_dispatch ]]; then
+            [[ "$GITHUB_REF" == refs/heads/main ]] || exit 1
+            [[ "$REQUESTED_PR" =~ ^[1-9][0-9]*$ ]] || exit 1
+            pr=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$REQUESTED_PR")
+            sha=$(jq -r .head.sha <<<"$pr")
+            [[ -z "$REQUESTED_SHA" || "$REQUESTED_SHA" == "$sha" ]] || exit 1
+          else
+            [[ "$TESTED_BRANCH" =~ ^code-a-cv-[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 0
+            prs=$(gh api --method GET "repos/$GITHUB_REPOSITORY/pulls" \
+              -f state=open -f base=main -f "head=$GITHUB_REPOSITORY_OWNER:$TESTED_BRANCH")
+            [[ "$(jq length <<<"$prs")" == 1 ]] || exit 0
+            pr=$(jq '.[0]' <<<"$prs")
+            sha=$(jq -r .head.sha <<<"$pr")
+            [[ "$sha" == "$TESTED_SHA" ]] || exit 0
+            jq -e --arg repo "$GITHUB_REPOSITORY" --arg owner "$GITHUB_REPOSITORY_OWNER" \
+              '.head.repo.full_name == $repo and .user.login == $owner and .draft == false' \
+              <<<"$pr" >/dev/null || exit 0
+          fi
+          jq -e '.state == "open" and .base.ref == "main"' <<<"$pr" >/dev/null
+          number=$(jq -r .number <<<"$pr")
+          if [[ "$EVENT_NAME" != workflow_dispatch ]]; then
+            files=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$number/files")
+            jq -e 'length == 1 and .[0].filename == "Formula/code-a-cv.rb" and
+              (.[0].status == "modified" or .[0].status == "added")' <<<"$files" >/dev/null || exit 0
+          fi
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
   pr-pull:
+    needs: resolve
+    if: needs.resolve.outputs.number != ''
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -40,8 +101,8 @@ jobs:
           HOMEBREW_GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_GIT_COMMITTER_NAME: ${{ steps.git_setup.outputs.name }}
           HOMEBREW_GIT_COMMITTER_EMAIL: ${{ steps.git_setup.outputs.email }}
-          HEAD_SHA: ${{ inputs.head_sha }}
-          PULL_REQUEST: ${{ inputs.pull_request }}
+          HEAD_SHA: ${{ needs.resolve.outputs.sha }}
+          PULL_REQUEST: ${{ needs.resolve.outputs.number }}
         run: |
           if [[ -n "$HEAD_SHA" ]]
           then
